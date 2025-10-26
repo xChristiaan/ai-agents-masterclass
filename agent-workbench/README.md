@@ -16,6 +16,8 @@ them in a single dashboard.
   that agent.
 - **Action planning** – Ask an agent for a structured automation playbook before starting execution
   to translate business objectives into concrete steps.
+- **Flexible model backends** – Switch between hosted OpenAI/Azure endpoints and local Ollama
+  models for cost-effective experimentation.
 
 ## Getting started
 
@@ -26,17 +28,23 @@ them in a single dashboard.
    pip install -r requirements.txt
    ```
 
-2. **Configure API keys**
+2. **Configure model access**
 
-   The app uses OpenAI compatible chat models. Create a `.env` file based on `.env.example` in this
-   directory and provide the relevant credentials.
+   Create a `.env` file based on `.env.example` in this directory and provide the relevant
+   credentials or local settings.
 
    ```bash
    cp .env.example .env
    ```
 
-   At a minimum you must set `OPENAI_API_KEY`. To use a fully managed Azure/OpenAI-compatible
-   endpoint you can also fill out the optional settings in the file.
+   - **Hosted APIs (OpenAI compatible)** – Set `OPENAI_API_KEY`. Optionally override
+     `OPENAI_BASE_URL` to point at another compatible provider.
+   - **Azure OpenAI** – Fill in `AZURE_OPENAI_API_KEY`, `AZURE_OPENAI_ENDPOINT`,
+     `AZURE_OPENAI_DEPLOYMENT`, and (optionally) `AZURE_OPENAI_API_VERSION`.
+   - **Local models** – Install and run [Ollama](https://ollama.com), ensure the
+     [`ollama`](https://pypi.org/project/ollama/) Python package is installed (it is included in
+     `requirements.txt`), and optionally set `OLLAMA_HOST` if the server is not running on the
+     default `http://127.0.0.1:11434`.
 
 3. **Launch the workbench**
 
@@ -47,6 +55,14 @@ them in a single dashboard.
    Once the app is running you can open the provided local URL in your browser, design agents, and
    run automation sessions with them.
 
+### Using local models
+
+When editing or creating an agent, choose **Local (Ollama / LM Studio)** as the provider in the
+sidebar. Provide the local model name (for example `llama3:8b`) and ensure the Ollama server is
+running with that model pulled. Conversations and action plans will then use your local inference
+endpoint instead of a paid API. If you prefer LM Studio or another OpenAI-compatible local server,
+leave the provider set to **OpenAI (hosted)** and point `OPENAI_BASE_URL` at the local endpoint.
+
 ## Configuration files
 
 - `agents.template.json` contains an example automation strategist agent. When you run the app for
@@ -56,9 +72,8 @@ them in a single dashboard.
 
 ## Development notes
 
-- The default OpenAI model list includes `gpt-4o-mini`, `gpt-4o`, `gpt-4.1-mini`, and
-  `gpt-3.5-turbo`. You can extend the list or adapt the API client inside `app.py` if your
-  automation stack uses a different provider.
+- You can extend the provider/model suggestions in `PROVIDER_SETTINGS` within `app.py` if your
+  automation stack relies on additional APIs or self-hosted models.
 - When running conversations, you can reset the session history with the **Reset chat** button to
   start a fresh mission for the selected agent.
 - The application keeps per-agent chat history in memory only. If you refresh the page the chat

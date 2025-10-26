@@ -18,12 +18,41 @@ APP_DIR = Path(__file__).resolve().parent
 AGENT_STORE_PATH = APP_DIR / "agents.json"
 AGENT_TEMPLATE_PATH = APP_DIR / "agents.template.json"
 
-MODEL_OPTIONS = [
-    "gpt-4o-mini",
-    "gpt-4o",
-    "gpt-4.1-mini",
-    "gpt-3.5-turbo",
-]
+DEFAULT_PROVIDER = "openai"
+PROVIDER_SETTINGS: Dict[str, Dict[str, object]] = {
+    "openai": {
+        "label": "OpenAI (hosted)",
+        "models": [
+            "gpt-4o-mini",
+            "gpt-4o",
+            "gpt-4.1-mini",
+            "gpt-3.5-turbo",
+        ],
+        "model_help": "Select a model served by OpenAI or a compatible hosted endpoint.",
+    },
+    "azure-openai": {
+        "label": "Azure OpenAI (managed)",
+        "models": [],
+        "model_help": "Enter the Azure deployment name that maps to your chosen model.",
+    },
+    "local": {
+        "label": "Local (Ollama / LM Studio)",
+        "models": [
+            "llama3:8b",
+            "phi3:mini",
+            "mistral:7b-instruct",
+        ],
+        "model_help": "Provide the local model name (for example `llama3:8b` in Ollama).",
+    },
+}
+DEFAULT_MODEL = PROVIDER_SETTINGS[DEFAULT_PROVIDER]["models"][0]
+
+
+def get_provider_label(provider: str) -> str:
+    settings = PROVIDER_SETTINGS.get(provider)
+    if settings and "label" in settings:
+        return str(settings["label"])
+    return provider
 
 
 class AgentConfig(BaseModel):
@@ -32,7 +61,8 @@ class AgentConfig(BaseModel):
     id: str
     name: str
     mission: str
-    model: str = Field(default=MODEL_OPTIONS[0])
+    provider: str = Field(default=DEFAULT_PROVIDER)
+    model: str = Field(default=DEFAULT_MODEL)
     temperature: float = Field(default=0.7, ge=0.0, le=1.0)
     system_prompt: str
     core_objectives: List[str] = Field(default_factory=list)
@@ -122,7 +152,8 @@ def build_system_prompt(agent: AgentConfig) -> str:
     return "\n\n".join(sections)
 
 
-def get_openai_client(agent: AgentConfig) -> Dict[str, Optional[str]]:
+def get_remote_client(agent: AgentConfig) -> Dict[str, Optional[str]]:
+    provider = agent.provider or DEFAULT_PROVIDER
     try:
         import openai  # type: ignore
     except ImportError as exc:  # pragma: no cover - Streamlit runtime
@@ -130,13 +161,18 @@ def get_openai_client(agent: AgentConfig) -> Dict[str, Optional[str]]:
             "The 'openai' package is required. Install dependencies with 'pip install -r requirements.txt'."
         ) from exc
 
-    azure_key = os.getenv("AZURE_OPENAI_API_KEY")
-    azure_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
-    azure_deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT")
-
-    if azure_key and azure_endpoint and azure_deployment:
+    if provider == "azure-openai":
+        azure_key = os.getenv("AZURE_OPENAI_API_KEY")
+        azure_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
+        azure_deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT")
+        if not (azure_key and azure_endpoint and azure_deployment):
+            raise RuntimeError(
+                "Azure OpenAI credentials are missing. Set AZURE_OPENAI_API_KEY, AZURE_OPENAI_ENDPOINT, "
+                "and AZURE_OPENAI_DEPLOYMENT in your environment or .env file."
+            )
+        api_version = os.getenv("AZURE_OPENAI_API_VERSION", "2023-05-15")
         openai.api_type = "azure"
-        openai.api_version = "2023-05-15"
+        openai.api_version = api_version
         openai.api_base = azure_endpoint
         openai.api_key = azure_key
         return {"type": "azure", "deployment": azure_deployment, "client": openai}
@@ -156,7 +192,11 @@ def get_openai_client(agent: AgentConfig) -> Dict[str, Optional[str]]:
 
 
 def call_model(agent: AgentConfig, messages: List[Dict[str, str]], max_tokens: int = 800) -> str:
-    client_info = get_openai_client(agent)
+    provider = agent.provider or DEFAULT_PROVIDER
+    if provider == "local":
+        return call_local_model(agent, messages, max_tokens=max_tokens)
+
+    client_info = get_remote_client(agent)
     client = client_info["client"]
 
     kwargs = {
@@ -176,6 +216,39 @@ def call_model(agent: AgentConfig, messages: List[Dict[str, str]], max_tokens: i
         raise RuntimeError(f"Model call failed: {exc}") from exc
 
     return response["choices"][0]["message"]["content"].strip()
+
+
+def call_local_model(agent: AgentConfig, messages: List[Dict[str, str]], max_tokens: int = 800) -> str:
+    try:
+        import ollama  # type: ignore
+    except ImportError as exc:  # pragma: no cover - optional dependency
+        raise RuntimeError(
+            "The 'ollama' package is required for local model support. Install it with 'pip install ollama'."
+        ) from exc
+
+    host = os.getenv("OLLAMA_HOST")
+    chat_callable = None
+    if host:
+        client = ollama.Client(host=host)
+        chat_callable = client.chat
+    else:
+        chat_callable = ollama.chat
+
+    options = {"temperature": agent.temperature, "num_predict": max_tokens}
+    try:
+        response = chat_callable(
+            model=agent.model,
+            messages=messages,
+            options=options,
+        )
+    except Exception as exc:  # pylint: disable=broad-except
+        raise RuntimeError(f"Local model call failed: {exc}") from exc
+
+    content = response.get("message", {}).get("content") if isinstance(response, dict) else None
+    if not content:
+        raise RuntimeError("Local model returned an empty response.")
+
+    return content.strip()
 
 
 def generate_action_plan(agent: AgentConfig, objective: str) -> str:
@@ -200,6 +273,7 @@ def generate_action_plan(agent: AgentConfig, objective: str) -> str:
 def render_agent_overview(agent: AgentConfig) -> None:
     st.subheader(agent.name)
     st.markdown(f"**Mission:** {agent.mission}")
+    st.markdown(f"**Provider:** {get_provider_label(agent.provider)}")
     st.markdown(f"**Model:** `{agent.model}` @ temperature `{agent.temperature}`")
 
     if agent.core_objectives:
@@ -297,6 +371,7 @@ def upsert_agent(
     existing: Optional[AgentConfig],
     name: str,
     mission: str,
+    provider: str,
     model: str,
     temperature: float,
     system_prompt: str,
@@ -318,7 +393,8 @@ def upsert_agent(
         id=agent_id,
         name=name,
         mission=mission,
-        model=model,
+        provider=provider,
+        model=model.strip(),
         temperature=temperature,
         system_prompt=system_prompt,
         core_objectives=parse_multiline(objectives_raw),
@@ -348,10 +424,54 @@ def render_agent_editor(agents: List[AgentConfig], selected_id: Optional[str]) -
             "Mission",
             value=defaults.get("mission", ""),
         )
-        model_default = defaults.get("model", MODEL_OPTIONS[0])
-        if model_default not in MODEL_OPTIONS:
-            model_default = MODEL_OPTIONS[0]
-        model = st.selectbox("Model", options=MODEL_OPTIONS, index=MODEL_OPTIONS.index(model_default))
+        provider_options = list(PROVIDER_SETTINGS.keys())
+        provider_default = defaults.get("provider", DEFAULT_PROVIDER)
+        if provider_default not in provider_options:
+            provider_default = DEFAULT_PROVIDER
+        provider_index = provider_options.index(provider_default)
+        provider = st.selectbox(
+            "Model provider",
+            options=provider_options,
+            index=provider_index,
+            format_func=get_provider_label,
+            help=(
+                "Choose between hosted APIs or local inference."
+                " Azure OpenAI requires environment credentials."
+            ),
+        )
+
+        provider_config = PROVIDER_SETTINGS.get(provider, {})
+        model_suggestions: List[str] = list(provider_config.get("models", []))
+        model_help = provider_config.get("model_help")
+        default_model = defaults.get("model") or (model_suggestions[0] if model_suggestions else "")
+        model = default_model
+        use_custom_input = False
+
+        if model_suggestions:
+            options = model_suggestions + ["Custom value…"]
+            if default_model and default_model not in model_suggestions:
+                options = [default_model, *[item for item in options if item != default_model]]
+            default_index = options.index(default_model) if default_model in options else 0
+            selected_model = st.selectbox(
+                "Model",
+                options=options,
+                index=default_index,
+                help=model_help,
+            )
+            if selected_model == "Custom value…":
+                use_custom_input = True
+            else:
+                model = selected_model
+        else:
+            use_custom_input = True
+
+        if use_custom_input:
+            model = st.text_input(
+                "Model",
+                value=default_model,
+                help=model_help,
+                placeholder="Enter the deployment or model identifier",
+            )
         temperature = st.slider(
             "Temperature",
             min_value=0.0,
@@ -409,6 +529,12 @@ def render_agent_editor(agents: List[AgentConfig], selected_id: Optional[str]) -
         if not mission.strip():
             st.sidebar.error("Mission is required.")
             return agent_lookup.get(selected_id)
+        if not provider:
+            st.sidebar.error("Select a model provider.")
+            return agent_lookup.get(selected_id)
+        if not model or not model.strip():
+            st.sidebar.error("Model or deployment name is required.")
+            return agent_lookup.get(selected_id)
         if not system_prompt.strip():
             st.sidebar.error("System prompt is required.")
             return agent_lookup.get(selected_id)
@@ -417,6 +543,7 @@ def render_agent_editor(agents: List[AgentConfig], selected_id: Optional[str]) -
             existing=agent,
             name=name.strip(),
             mission=mission.strip(),
+            provider=provider,
             model=model,
             temperature=temperature,
             system_prompt=system_prompt.strip(),

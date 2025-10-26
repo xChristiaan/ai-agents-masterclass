@@ -3,6 +3,7 @@
     "id": "automation-strategist",
     "name": "Automation Strategist",
     "mission": "Design and orchestrate automation roadmaps for client businesses.",
+    "provider": "openai",
     "model": "gpt-4o-mini",
     "temperature": 0.6,
     "system_prompt": "You are an elite automation consultant working inside an AI automation agency.\nYour job is to translate business objectives into concrete automation plans, evaluate tooling options,\nand communicate next steps with clarity and confidence.",
